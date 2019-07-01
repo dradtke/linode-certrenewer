@@ -43,13 +43,13 @@ func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *au
 
 		certText, err := getCertText(cert)
 		if err != nil {
-			log.Printf("failed to marshal certificate: %s", err)
+			log.Printf("failed to get certificate text: %s", err)
 			continue
 		}
 
 		keyText, err := getKeyText(cert)
 		if err != nil {
-			log.Printf("failed to marshal key: %s", err)
+			log.Printf("failed to get key text: %s", err)
 			continue
 		}
 
@@ -77,7 +77,7 @@ func getCertText(cert *tls.Certificate) (string, error) {
 			Type:  "CERTIFICATE",
 			Bytes: part,
 		}); err != nil {
-			return "", err
+			return "", errors.New("failed to pem-encode certificate: " + err.Error())
 		}
 	}
 	return builder.String(), nil
@@ -86,11 +86,14 @@ func getCertText(cert *tls.Certificate) (string, error) {
 func getKeyText(cert *tls.Certificate) (string, error) {
 	switch t := cert.PrivateKey.(type) {
 	case *rsa.PrivateKey:
-		v := pem.EncodeToMemory(&pem.Block{
+		var builder strings.Builder
+		if err := pem.Encode(&builder, &pem.Block{
 			Type:  "PRIVATE KEY",
 			Bytes: x509.MarshalPKCS1PrivateKey(t),
-		})
-		return string(v), nil
+		}); err != nil {
+			return "", errors.New("failed to pem-encode key: " + err.Error())
+		}
+		return builder.String(), nil
 
 	default:
 		return "", fmt.Errorf("unknown private key type: %T", cert.PrivateKey)
@@ -136,7 +139,7 @@ func save(ctx context.Context, linode linodego.Client, balancerNameOrID, certTex
 func findNodeBalancer(ctx context.Context, linode linodego.Client, nameOrID string) (*linodego.NodeBalancer, error) {
 	balancers, err := linode.ListNodeBalancers(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("failed to list node balancers: " + err.Error())
 	}
 	id, _ := strconv.Atoi(nameOrID)
 	for _, balancer := range balancers {
@@ -150,7 +153,7 @@ func findNodeBalancer(ctx context.Context, linode linodego.Client, nameOrID stri
 func findNodeBalancerConfig(ctx context.Context, linode linodego.Client, balancer *linodego.NodeBalancer) (*linodego.NodeBalancerConfig, error) {
 	configs, err := linode.ListNodeBalancerConfigs(ctx, balancer.ID, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("failed to list node balancer configs: " + err.Error())
 	}
 	for _, config := range configs {
 		if config.Port == 443 {
