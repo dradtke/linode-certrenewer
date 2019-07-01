@@ -38,19 +38,19 @@ func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *au
 		cert, err := manager.GetCertificate(hello)
 		if err != nil {
 			log.Printf("failed to renew certificate: %s", err)
-			return
+			continue
 		}
 
 		certText, err := getCertText(cert)
 		if err != nil {
 			log.Printf("failed to marshal certificate: %s", err)
-			return
+			continue
 		}
 
 		keyText, err := getKeyText(cert)
 		if err != nil {
 			log.Printf("failed to marshal key: %s", err)
-			return
+			continue
 		}
 
 		log.Printf("got certificate:\n%s", certText)
@@ -63,7 +63,7 @@ func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *au
 		log.Println("saving certificate to nodebalancer config")
 		if err = save(ctx, linode, balancerNameOrID, certText, keyText); err != nil {
 			log.Printf("failed to save certificate: %s", err)
-			return
+			continue
 		}
 
 		log.Println("certificate updated for balancer " + balancerNameOrID)
