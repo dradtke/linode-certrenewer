@@ -28,9 +28,14 @@ const (
 )
 
 func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *autocert.Manager, linode linodego.Client, balancerNameOrID, domain string, production bool) {
-	for range time.NewTicker(frequency).C {
-		log.Println("renewing certificate")
-		cert, err := renew(manager, domain)
+	ticker := time.NewTicker(frequency)
+	hello := &tls.ClientHelloInfo{
+		ServerName: domain,
+	}
+
+	for range ticker.C {
+		log.Println("renewing certificate for " + hello.ServerName)
+		cert, err := manager.GetCertificate(hello)
 		if err != nil {
 			log.Printf("failed to renew certificate: %s", err)
 			return
@@ -63,12 +68,6 @@ func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *au
 
 		log.Println("certificate updated for balancer " + balancerNameOrID)
 	}
-}
-
-func renew(manager *autocert.Manager, domain string) (*tls.Certificate, error) {
-	return manager.GetCertificate(&tls.ClientHelloInfo{
-		ServerName: domain,
-	})
 }
 
 func getCertText(cert *tls.Certificate) (string, error) {
@@ -139,7 +138,7 @@ func findNodeBalancer(ctx context.Context, linode linodego.Client, nameOrID stri
 	if err != nil {
 		return nil, err
 	}
-	id, _ := strconv.Atoi(nameOrID) // if not a number, we won't use it to check
+	id, _ := strconv.Atoi(nameOrID)
 	for _, balancer := range balancers {
 		if (id != 0 && balancer.ID == id) || (id == 0 && *balancer.Label == nameOrID) {
 			return &balancer, nil
@@ -162,12 +161,11 @@ func findNodeBalancerConfig(ctx context.Context, linode linodego.Client, balance
 }
 
 func createLinodeClient(token string) linodego.Client {
-	oauth2Client := &http.Client{
+	return linodego.NewClient(&http.Client{
 		Transport: &oauth2.Transport{
 			Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}),
 		},
-	}
-	return linodego.NewClient(oauth2Client)
+	})
 }
 
 func redirect(addr string) http.Handler {
@@ -180,6 +178,26 @@ func redirect(addr string) http.Handler {
 func parseBool(v string) bool {
 	b, _ := strconv.ParseBool(v)
 	return b
+}
+
+func makeManager(domain, email, cacheDir string, production bool) *autocert.Manager {
+	manager := &autocert.Manager{
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: autocert.HostWhitelist(domain),
+		Email:      email,
+		Client:     &acme.Client{},
+	}
+	if cacheDir != "" {
+		manager.Cache = autocert.DirCache(cacheDir)
+	}
+	if production {
+		log.Println("running in PRODUCTION")
+		manager.Client.DirectoryURL = ProductionDirectory
+	} else {
+		log.Println("running in STAGING")
+		manager.Client.DirectoryURL = StagingDirectory
+	}
+	return manager
 }
 
 func main() {
@@ -207,23 +225,7 @@ func main() {
 	}
 
 	linode := createLinodeClient(*linodeToken)
-
-	manager := &autocert.Manager{
-		Prompt:     autocert.AcceptTOS,
-		HostPolicy: autocert.HostWhitelist(*domain),
-		Email:      *email,
-		Client:     &acme.Client{},
-	}
-	if *cacheDir != "" {
-		manager.Cache = autocert.DirCache(*cacheDir)
-	}
-	if *production {
-		log.Println("running in PRODUCTION")
-		manager.Client.DirectoryURL = ProductionDirectory
-	} else {
-		log.Println("running in STAGING")
-		manager.Client.DirectoryURL = StagingDirectory
-	}
+	manager := makeManager(*domain, *email, *cacheDir, *production)
 
 	go periodicallyRenew(ctx, frequency, manager, linode, *balancerNameOrID, *domain, *production)
 
