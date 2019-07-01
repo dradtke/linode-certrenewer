@@ -7,10 +7,12 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,29 +21,15 @@ import (
 	"golang.org/x/oauth2"
 )
 
-const (
-	RenewalDuration = 24 * time.Hour
-	Host            = "damienradtke.com"
-	BalancerName    = "damienradtkecom"
-	LinodeToken     = "af53c271d591561eec8c78e88830fbac2c102e0f36796745ac3ff0fb442c7ebd"
-)
-
-var manager = autocert.Manager{
-	Prompt:     autocert.AcceptTOS,
-	Cache:      autocert.DirCache(os.Getenv("NOMAD_SECRETS_DIR")),
-	HostPolicy: autocert.HostWhitelist(Host, "www."+Host),
-	Email:      "me@damienradtke.com",
-}
-
-func periodicallyRenew() {
-	for range time.NewTicker(RenewalDuration).C {
-		renewAndSave(context.Background())
+func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *autocert.Manager, linode linodego.Client, balancerNameOrID, domain string) {
+	for range time.NewTicker(frequency).C {
+		renewAndSave(ctx, manager, linode, balancerNameOrID, domain)
 	}
 }
 
-func renewAndSave(ctx context.Context) {
+func renewAndSave(ctx context.Context, manager *autocert.Manager, linode linodego.Client, balancerNameOrID, domain string) {
 	log.Println("renewing certificate")
-	cert, err := renew()
+	cert, err := renew(manager, domain)
 	if err != nil {
 		log.Printf("failed to renew certificate: %s", err)
 		return
@@ -60,17 +48,17 @@ func renewAndSave(ctx context.Context) {
 	}
 
 	log.Println("saving certificate to nodebalancer config")
-	if err = save(ctx, certText, keyText); err != nil {
+	if err = save(ctx, linode, balancerNameOrID, certText, keyText); err != nil {
 		log.Printf("failed to save certificate: %s", err)
 		return
 	}
 
-	log.Println("certificate updated for " + BalancerName)
+	log.Println("certificate updated for balancer " + balancerNameOrID)
 }
 
-func renew() (*tls.Certificate, error) {
+func renew(manager *autocert.Manager, domain string) (*tls.Certificate, error) {
 	return manager.GetCertificate(&tls.ClientHelloInfo{
-		ServerName: Host,
+		ServerName: domain,
 	})
 }
 
@@ -101,10 +89,8 @@ func getKeyText(cert *tls.Certificate) (string, error) {
 	}
 }
 
-func save(ctx context.Context, certText, keyText string) error {
-	linode := createLinodeClient(LinodeToken)
-
-	balancer, err := findNodeBalancer(ctx, linode, BalancerName)
+func save(ctx context.Context, linode linodego.Client, balancerNameOrID, certText, keyText string) error {
+	balancer, err := findNodeBalancer(ctx, linode, balancerNameOrID)
 	if err != nil {
 		return errors.New("failed to find node balancer: " + err.Error())
 	}
@@ -139,20 +125,21 @@ func save(ctx context.Context, certText, keyText string) error {
 	return nil
 }
 
-func findNodeBalancer(ctx context.Context, linode linodego.Client, name string) (linodego.NodeBalancer, error) {
+func findNodeBalancer(ctx context.Context, linode linodego.Client, nameOrID string) (*linodego.NodeBalancer, error) {
 	balancers, err := linode.ListNodeBalancers(ctx, nil)
 	if err != nil {
-		return linodego.NodeBalancer{}, err
+		return nil, err
 	}
+	id, _ := strconv.Atoi(nameOrID) // if not a number, we won't use it to check
 	for _, balancer := range balancers {
-		if *balancer.Label == name {
-			return balancer, nil
+		if (id != 0 && balancer.ID == id) || (id == 0 && *balancer.Label == nameOrID) {
+			return &balancer, nil
 		}
 	}
-	return linodego.NodeBalancer{}, errors.New("not found")
+	return nil, nil
 }
 
-func findNodeBalancerConfig(ctx context.Context, linode linodego.Client, balancer linodego.NodeBalancer) (*linodego.NodeBalancerConfig, error) {
+func findNodeBalancerConfig(ctx context.Context, linode linodego.Client, balancer *linodego.NodeBalancer) (*linodego.NodeBalancerConfig, error) {
 	configs, err := linode.ListNodeBalancerConfigs(ctx, balancer.ID, nil)
 	if err != nil {
 		return nil, err
@@ -174,15 +161,52 @@ func createLinodeClient(token string) linodego.Client {
 	return linodego.NewClient(oauth2Client)
 }
 
-func fallback(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "https://damienradtke.com/", http.StatusFound)
+func redirect(addr string) http.Handler {
+	target := "https://" + addr
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target, http.StatusFound)
+	})
 }
 
 func main() {
-	go periodicallyRenew()
-	var port = os.Getenv("NOMAD_PORT_http")
-	log.Println("listening on port " + port)
-	if err := http.ListenAndServe(":"+port, manager.HTTPHandler(http.HandlerFunc(fallback))); err != nil {
+	var (
+		ctx              = context.Background()
+		frequencyString  = flag.String("frequency", os.Getenv("FREQUENCY"), "how often to attempt certificate renewal, in a form understandable by time.ParseDuration()")
+		balancerNameOrID = flag.String("balancer", os.Getenv("BALANCER"), "id or label of the NodeBalancer to update")
+		linodeToken      = flag.String("access-token", os.Getenv("LINODE_TOKEN"), "Linode API token")
+		email            = flag.String("email", os.Getenv("EMAIL"), "email used for the renewal process")
+		domain           = flag.String("domain", os.Getenv("DOMAIN"), "domain to renew")
+		port             = flag.String("port", os.Getenv("PORT"), "port to listen on")
+		cacheDir         = flag.String("cache-dir", os.Getenv("CACHE_DIR"), "autocert cache directory") // optional
+	)
+	flag.Parse()
+
+	if *frequencyString == "" || *balancerNameOrID == "" || *linodeToken == "" || *email == "" || *port == "" || *domain == "" {
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	frequency, err := time.ParseDuration(*frequencyString)
+	if err != nil {
+		log.Fatalf("coudln't parse frequency '%s': %s", *frequencyString, err)
+	}
+
+	linode := createLinodeClient(*linodeToken)
+
+	manager := &autocert.Manager{
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: autocert.HostWhitelist(*domain),
+		Email:      *email,
+	}
+	if *cacheDir != "" {
+		manager.Cache = autocert.DirCache(*cacheDir)
+	}
+
+	go periodicallyRenew(ctx, frequency, manager, linode, *balancerNameOrID, *domain)
+
+	log.Println("listening on port " + *port)
+	fallback := redirect(*domain)
+	if err := http.ListenAndServe(":"+*port, manager.HTTPHandler(fallback)); err != nil {
 		log.Fatal(err)
 	}
 }
