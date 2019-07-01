@@ -17,43 +17,52 @@ import (
 	"time"
 
 	"github.com/linode/linodego"
+	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/oauth2"
 )
 
-func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *autocert.Manager, linode linodego.Client, balancerNameOrID, domain string) {
+const (
+	StagingDirectory    = "https://acme-staging.api.letsencrypt.org/directory"
+	ProductionDirectory = "https://acme-v01.api.letsencrypt.org/directory"
+)
+
+func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *autocert.Manager, linode linodego.Client, balancerNameOrID, domain string, production bool) {
 	for range time.NewTicker(frequency).C {
-		renewAndSave(ctx, manager, linode, balancerNameOrID, domain)
-	}
-}
+		log.Println("renewing certificate")
+		cert, err := renew(manager, domain)
+		if err != nil {
+			log.Printf("failed to renew certificate: %s", err)
+			return
+		}
 
-func renewAndSave(ctx context.Context, manager *autocert.Manager, linode linodego.Client, balancerNameOrID, domain string) {
-	log.Println("renewing certificate")
-	cert, err := renew(manager, domain)
-	if err != nil {
-		log.Printf("failed to renew certificate: %s", err)
-		return
-	}
+		certText, err := getCertText(cert)
+		if err != nil {
+			log.Printf("failed to marshal certificate: %s", err)
+			return
+		}
 
-	certText, err := getCertText(cert)
-	if err != nil {
-		log.Printf("failed to marshal certificate: %s", err)
-		return
-	}
+		keyText, err := getKeyText(cert)
+		if err != nil {
+			log.Printf("failed to marshal key: %s", err)
+			return
+		}
 
-	keyText, err := getKeyText(cert)
-	if err != nil {
-		log.Printf("failed to marshal key: %s", err)
-		return
-	}
+		log.Printf("got certificate:\n%s", certText)
 
-	log.Println("saving certificate to nodebalancer config")
-	if err = save(ctx, linode, balancerNameOrID, certText, keyText); err != nil {
-		log.Printf("failed to save certificate: %s", err)
-		return
-	}
+		if !production {
+			log.Println("running in staging, not saving to balancer")
+			continue
+		}
 
-	log.Println("certificate updated for balancer " + balancerNameOrID)
+		log.Println("saving certificate to nodebalancer config")
+		if err = save(ctx, linode, balancerNameOrID, certText, keyText); err != nil {
+			log.Printf("failed to save certificate: %s", err)
+			return
+		}
+
+		log.Println("certificate updated for balancer " + balancerNameOrID)
+	}
 }
 
 func renew(manager *autocert.Manager, domain string) (*tls.Certificate, error) {
@@ -168,6 +177,11 @@ func redirect(addr string) http.Handler {
 	})
 }
 
+func parseBool(v string) bool {
+	b, _ := strconv.ParseBool(v)
+	return b
+}
+
 func main() {
 	var (
 		ctx              = context.Background()
@@ -178,6 +192,7 @@ func main() {
 		domain           = flag.String("domain", os.Getenv("DOMAIN"), "domain to renew")
 		port             = flag.String("port", os.Getenv("PORT"), "port to listen on")
 		cacheDir         = flag.String("cache-dir", os.Getenv("CACHE_DIR"), "autocert cache directory") // optional
+		production       = flag.Bool("production", parseBool(os.Getenv("PRODUCTION")), "set to true to run against the production Let's Encrypt endpoint")
 	)
 	flag.Parse()
 
@@ -197,12 +212,20 @@ func main() {
 		Prompt:     autocert.AcceptTOS,
 		HostPolicy: autocert.HostWhitelist(*domain),
 		Email:      *email,
+		Client:     &acme.Client{},
 	}
 	if *cacheDir != "" {
 		manager.Cache = autocert.DirCache(*cacheDir)
 	}
+	if *production {
+		log.Println("running in PRODUCTION")
+		manager.Client.DirectoryURL = ProductionDirectory
+	} else {
+		log.Println("running in STAGING")
+		manager.Client.DirectoryURL = StagingDirectory
+	}
 
-	go periodicallyRenew(ctx, frequency, manager, linode, *balancerNameOrID, *domain)
+	go periodicallyRenew(ctx, frequency, manager, linode, *balancerNameOrID, *domain, *production)
 
 	log.Println("listening on port " + *port)
 	fallback := redirect(*domain)
