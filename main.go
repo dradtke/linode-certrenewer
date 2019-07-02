@@ -208,7 +208,7 @@ func main() {
 		ctx              = context.Background()
 		frequencyString  = flag.String("frequency", os.Getenv("FREQUENCY"), "how often to attempt certificate renewal, in a form understandable by time.ParseDuration()")
 		balancerNameOrID = flag.String("balancer", os.Getenv("BALANCER"), "id or label of the NodeBalancer to update")
-		linodeToken      = flag.String("access-token", os.Getenv("LINODE_TOKEN"), "Linode API token")
+		linodeToken      = flag.String("linode-token", os.Getenv("LINODE_TOKEN"), "Linode API token")
 		email            = flag.String("email", os.Getenv("EMAIL"), "email used for the renewal process")
 		domain           = flag.String("domain", os.Getenv("DOMAIN"), "domain to renew")
 		port             = flag.String("port", os.Getenv("PORT"), "port to listen on")
