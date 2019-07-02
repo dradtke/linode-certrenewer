@@ -9,22 +9,24 @@ Usage:
 
 ```bash
 Usage of cert-renewer:
-  -linode-token string
-        Linode API token
   -balancer string
         id or label of the NodeBalancer to update
   -cache-dir string
-        autocert cache directory
+        autocert cache directory (optional)
   -domain string
         domain to renew
   -email string
         email used for the renewal process
   -frequency string
         how often to attempt certificate renewal, in a form understandable by https://golang.org/pkg/time/#ParseDuration
+  -init
+        set to true to do an initial run before switching to a regular interval (defaults to false)
+  -linode-token string
+        Linode API token
   -port string
-        port to listen on
+        port for the HTTP challenge handler to listen on
   -production
-        set to true to run against the production Let's Encrypt endpoint
+        set to true to run against the production Let's Encrypt endpoint (defaults to staging)
 ```
 
 Each value can also be set by an environment variable of the same name, e.g.

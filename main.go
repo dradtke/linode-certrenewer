@@ -27,47 +27,57 @@ const (
 	ProductionDirectory = "https://acme-v01.api.letsencrypt.org/directory"
 )
 
-func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *autocert.Manager, linode linodego.Client, balancerNameOrID, domain string, production bool) {
-	ticker := time.NewTicker(frequency)
+func periodicallyRenew(ctx context.Context, frequency time.Duration, manager *autocert.Manager, linode linodego.Client, balancerNameOrID, domain string, production, init bool) {
 	hello := &tls.ClientHelloInfo{
 		ServerName: domain,
 	}
-
-	for range ticker.C {
-		log.Println("renewing certificate for " + hello.ServerName)
-		cert, err := manager.GetCertificate(hello)
-		if err != nil {
-			log.Printf("failed to renew certificate: %s", err)
-			continue
-		}
-
-		certText, err := getCertText(cert)
-		if err != nil {
-			log.Printf("failed to get certificate text: %s", err)
-			continue
-		}
-
-		keyText, err := getKeyText(cert)
-		if err != nil {
-			log.Printf("failed to get key text: %s", err)
-			continue
-		}
-
-		log.Printf("got certificate:\n%s", certText)
-
-		if !production {
-			log.Println("running in staging, not saving to balancer")
-			continue
-		}
-
-		log.Println("saving certificate to nodebalancer config")
-		if err = save(ctx, linode, balancerNameOrID, certText, keyText); err != nil {
-			log.Printf("failed to save certificate: %s", err)
-			continue
-		}
-
-		log.Println("certificate updated for balancer " + balancerNameOrID)
+	if init {
+		log.Println("performing an initial renewal in 30 seconds...")
+		time.Sleep(30 * time.Second) // to give the balancer some time to see that we're up
+		renew(ctx, frequency, manager, linode, balancerNameOrID, domain, production, hello)
 	}
+
+	ticker := time.NewTicker(frequency)
+	log.Printf("next renewal scheduled for %s", time.Now().Add(frequency).Format(time.Stamp))
+	for t := range ticker.C {
+		renew(ctx, frequency, manager, linode, balancerNameOrID, domain, production, hello)
+		log.Printf("next renewal scheduled for %s", t.Add(frequency).Format(time.Stamp))
+	}
+}
+
+func renew(ctx context.Context, frequency time.Duration, manager *autocert.Manager, linode linodego.Client, balancerNameOrID, domain string, production bool, hello *tls.ClientHelloInfo) {
+	log.Println("renewing certificate for " + hello.ServerName)
+	cert, err := manager.GetCertificate(hello)
+	if err != nil {
+		log.Printf("failed to renew certificate: %s", err)
+		return
+	}
+
+	certText, err := getCertText(cert)
+	if err != nil {
+		log.Printf("failed to get certificate text: %s", err)
+		return
+	}
+
+	keyText, err := getKeyText(cert)
+	if err != nil {
+		log.Printf("failed to get key text: %s", err)
+		return
+	}
+
+	log.Printf("got certificate:\n%s", certText)
+
+	if !production {
+		log.Printf("got key:\n%s", keyText)
+	}
+
+	log.Println("saving certificate to nodebalancer config")
+	if err = save(ctx, linode, balancerNameOrID, certText, keyText); err != nil {
+		log.Printf("failed to save certificate: %s", err)
+		return
+	}
+
+	log.Println("certificate updated for balancer " + balancerNameOrID)
 }
 
 func getCertText(cert *tls.Certificate) (string, error) {
@@ -88,7 +98,7 @@ func getKeyText(cert *tls.Certificate) (string, error) {
 	case *rsa.PrivateKey:
 		var builder strings.Builder
 		if err := pem.Encode(&builder, &pem.Block{
-			Type:  "PRIVATE KEY",
+			Type:  "RSA PRIVATE KEY",
 			Bytes: x509.MarshalPKCS1PrivateKey(t),
 		}); err != nil {
 			return "", errors.New("failed to pem-encode key: " + err.Error())
@@ -126,6 +136,7 @@ func save(ctx context.Context, linode linodego.Client, balancerNameOrID, certTex
 		}
 	} else {
 		if _, err = linode.UpdateNodeBalancerConfig(ctx, balancer.ID, config.ID, linodego.NodeBalancerConfigUpdateOptions{
+			Port:    443,
 			SSLCert: certText,
 			SSLKey:  keyText,
 		}); err != nil {
@@ -211,9 +222,10 @@ func main() {
 		linodeToken      = flag.String("linode-token", os.Getenv("LINODE_TOKEN"), "Linode API token")
 		email            = flag.String("email", os.Getenv("EMAIL"), "email used for the renewal process")
 		domain           = flag.String("domain", os.Getenv("DOMAIN"), "domain to renew")
-		port             = flag.String("port", os.Getenv("PORT"), "port to listen on")
-		cacheDir         = flag.String("cache-dir", os.Getenv("CACHE_DIR"), "autocert cache directory") // optional
-		production       = flag.Bool("production", parseBool(os.Getenv("PRODUCTION")), "set to true to run against the production Let's Encrypt endpoint")
+		port             = flag.String("port", os.Getenv("PORT"), "port for the HTTP challenge handler to listen on")
+		cacheDir         = flag.String("cache-dir", os.Getenv("CACHE_DIR"), "autocert cache directory (optional)")
+		production       = flag.Bool("production", parseBool(os.Getenv("PRODUCTION")), "set to true to run against the production Let's Encrypt endpoint (defaults to staging)")
+		init             = flag.Bool("init", parseBool(os.Getenv("INIT")), "set to true to do an initial run before switching to a regular interval (defaults to false)")
 	)
 	flag.Parse()
 
@@ -230,7 +242,7 @@ func main() {
 	linode := createLinodeClient(*linodeToken)
 	manager := makeManager(*domain, *email, *cacheDir, *production)
 
-	go periodicallyRenew(ctx, frequency, manager, linode, *balancerNameOrID, *domain, *production)
+	go periodicallyRenew(ctx, frequency, manager, linode, *balancerNameOrID, *domain, *production, *init)
 
 	log.Println("listening on port " + *port)
 	fallback := redirect(*domain)
