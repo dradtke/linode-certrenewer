@@ -20,7 +20,7 @@ Usage of cert-renewer:
   -email string
         email used for the renewal process
   -frequency string
-        how often to attempt certificate renewal, in a form understandable by time.ParseDuration()
+        how often to attempt certificate renewal, in a form understandable by https://golang.org/pkg/time/#ParseDuration
   -port string
         port to listen on
   -production

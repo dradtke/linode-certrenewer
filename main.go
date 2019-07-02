@@ -206,7 +206,7 @@ func makeManager(domain, email, cacheDir string, production bool) *autocert.Mana
 func main() {
 	var (
 		ctx              = context.Background()
-		frequencyString  = flag.String("frequency", os.Getenv("FREQUENCY"), "how often to attempt certificate renewal, in a form understandable by time.ParseDuration()")
+		frequencyString  = flag.String("frequency", os.Getenv("FREQUENCY"), "how often to attempt certificate renewal, in a form understandable by https://golang.org/pkg/time/#ParseDuration")
 		balancerNameOrID = flag.String("balancer", os.Getenv("BALANCER"), "id or label of the NodeBalancer to update")
 		linodeToken      = flag.String("linode-token", os.Getenv("LINODE_TOKEN"), "Linode API token")
 		email            = flag.String("email", os.Getenv("EMAIL"), "email used for the renewal process")
